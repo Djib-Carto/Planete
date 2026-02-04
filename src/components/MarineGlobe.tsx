@@ -19,10 +19,10 @@ const getResource = (path: string) => {
     const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
 
     if (isProd) {
-        // Use Cesium's native proxy handler with a reliable service
         return new Cesium.Resource({
             url: targetUrl,
-            proxy: new Cesium.DefaultProxy('https://corsproxy.io/?')
+            // corsproxy.org is more reliable for institutional data
+            proxy: new Cesium.DefaultProxy('https://corsproxy.org/?')
         });
     }
 

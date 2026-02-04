@@ -1,4 +1,4 @@
-name: Deploy to GitHub Pages
+name: Deploy Planete to GitHub Pages
 
 on:
   push:
@@ -11,19 +11,38 @@ permissions:
   id-token: write
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      # 1. Récupérer le code
+      - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. Installer Node.js
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      # 3. Installer les dépendances
+      - name: Install dependencies
+        run: npm install
+
+      # 4. Construire le site (build)
+      - name: Build project
+        run: npm run build
+
+      # 5. Préparer GitHub Pages
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload artifact
+      # 6. Envoyer le dossier final (dist)
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: dist
 
-      - name: Deploy
+      # 7. Déployer
+      - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4

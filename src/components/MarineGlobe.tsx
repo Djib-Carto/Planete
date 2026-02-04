@@ -17,8 +17,9 @@ interface MPAData {
 const getApiUrl = (base: string, path: string) => {
     const isProd = import.meta.env.PROD;
     if (isProd) {
-        // Use a public CORS proxy for GitHub Pages deployment
-        return `https://corsproxy.io/?${encodeURIComponent('https://data-gis.unep-wcmc.org' + path)}`;
+        // Use a more reliable public CORS proxy for GitHub Pages deployment
+        const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
+        return `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
     }
     return base + path;
 };
@@ -108,7 +109,7 @@ export default function MarineGlobe() {
         if (!extent) return;
 
         // Limiter la charge : ne charger les vecteurs que si on est assez proche du sol
-        if (viewer.camera.positionCartographic.height > 6000000) {
+        if (viewer.camera.positionCartographic.height > 10000000) {
             if (wdpaDataSourceRef.current) wdpaDataSourceRef.current.show = false;
             return;
         }

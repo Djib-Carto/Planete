@@ -14,14 +14,21 @@ interface MPAData {
     properties: Record<string, any>;
 }
 
-const getApiUrl = (base: string, path: string) => {
+const getResource = (path: string) => {
     const isProd = import.meta.env.PROD;
+    const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
+
     if (isProd) {
-        // Use a more reliable public CORS proxy for GitHub Pages deployment
-        const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
-        return `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+        // Use Cesium's native proxy handler with a reliable service
+        return new Cesium.Resource({
+            url: targetUrl,
+            proxy: new Cesium.DefaultProxy('https://corsproxy.io/?')
+        });
     }
-    return base + path;
+
+    // In dev, use the Vite proxy defined in vite.config.ts
+    const localBase = path.startsWith('/server') ? '/wdpa-api' : '/habitats-api';
+    return new Cesium.Resource({ url: localBase + path });
 };
 
 export default function MarineGlobe() {
@@ -124,14 +131,14 @@ export default function MarineGlobe() {
             const queryPath = `/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/FeatureServer/1/query?` +
                 `geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects&outFields=*&f=geojson`;
 
-            const geojsonUrl = getApiUrl('/wdpa-api', queryPath);
+            const resource = getResource(queryPath);
 
             if (!wdpaDataSourceRef.current) {
                 wdpaDataSourceRef.current = new Cesium.GeoJsonDataSource("WDPA-Vector");
                 viewer.dataSources.add(wdpaDataSourceRef.current);
             }
 
-            await wdpaDataSourceRef.current.load(geojsonUrl, {
+            await wdpaDataSourceRef.current.load(resource, {
                 stroke: Cesium.Color.fromCssColorString('#f59e0b'), // Ambre/Orange
                 fill: Cesium.Color.fromCssColorString('#f59e0b').withAlpha(0.3),
                 strokeWidth: 2,
@@ -198,8 +205,8 @@ export default function MarineGlobe() {
             // B. Visual WDPA (Imagery - Ambre/Or)
             if (!wdpaLayerRef.current) {
                 try {
-                    const wdpaUrl = getApiUrl('/wdpa-api', '/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/MapServer');
-                    const wdpaImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(wdpaUrl);
+                    const wdpaResource = getResource('/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/MapServer');
+                    const wdpaImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(wdpaResource);
                     wdpaLayerRef.current = layersCollection.addImageryProvider(wdpaImagery);
                     wdpaLayerRef.current.alpha = 0.8;
                 } catch (e) {
@@ -211,8 +218,8 @@ export default function MarineGlobe() {
             // C. Mangroves (Vert Émeraude - BOOST DE LISIBILITÉ)
             if (!mangroveLayerRef.current) {
                 try {
-                    const mangroveUrl = getApiUrl('/habitats-api', '/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/MapServer');
-                    const mangroveImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(mangroveUrl);
+                    const mangroveResource = getResource('/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/MapServer');
+                    const mangroveImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(mangroveResource);
                     mangroveLayerRef.current = layersCollection.addImageryProvider(mangroveImagery);
                     mangroveLayerRef.current.alpha = 1.0;
                     mangroveLayerRef.current.brightness = 2.5; // Très brillant

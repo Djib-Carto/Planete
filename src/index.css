@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    background-color: black;
+    color: white;
+    margin: 0;
+    overflow: hidden;
+  }
+}
+
+/* Cesium overwrites */
+.cesium-viewer-bottom {
+  display: none !important;
+}
+
+.cesium-viewer-toolbar {
+  top: 20px !important;
+  right: 20px !important;
+}

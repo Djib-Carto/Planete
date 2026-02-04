@@ -1,4 +1,4 @@
-import React from 'react';
+
 import MarineGlobe from './components/MarineGlobe';
 
 function App() {

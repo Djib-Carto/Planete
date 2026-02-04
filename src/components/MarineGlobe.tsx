@@ -14,6 +14,17 @@ interface MPAData {
     properties: Record<string, any>;
 }
 
+// Custom Proxy for GitHub Pages production to handle complex GIS URLs
+class CustomProxy {
+    baseUrl: string;
+    constructor(baseUrl: string) {
+        this.baseUrl = baseUrl;
+    }
+    getURL(url: string) {
+        return this.baseUrl + encodeURIComponent(url);
+    }
+}
+
 const getResource = (path: string) => {
     const isProd = import.meta.env.PROD;
     const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
@@ -21,8 +32,8 @@ const getResource = (path: string) => {
     if (isProd) {
         return new Cesium.Resource({
             url: targetUrl,
-            // corsproxy.org is more reliable for institutional data
-            proxy: new Cesium.DefaultProxy('https://corsproxy.org/?')
+            // codetabs is high-availability and handles GIS headers well
+            proxy: new CustomProxy('https://api.codetabs.com/v1/proxy?quest=') as any
         });
     }
 

@@ -32,8 +32,8 @@ const getResource = (path: string) => {
     if (isProd) {
         return new Cesium.Resource({
             url: targetUrl,
-            // codetabs is high-availability and handles GIS headers well
-            proxy: new CustomProxy('https://api.codetabs.com/v1/proxy?quest=') as any
+            // corsproxy.io is high-availability and handles GIS headers well
+            proxy: new CustomProxy('https://corsproxy.io/?') as any
         });
     }
 

@@ -1,6 +1,12 @@
-export default function Legend() {
+interface LegendProps {
+    sidebarOpen?: boolean;
+}
+
+export default function Legend({ sidebarOpen }: LegendProps) {
     return (
-        <div className="absolute bottom-10 right-8 bg-black/60 backdrop-blur-xl border border-white/5 rounded-2xl p-6 z-40 text-white shadow-2xl w-72 transition-all">
+        <div className={`absolute bottom-10 bg-black/60 backdrop-blur-xl border border-white/5 rounded-2xl p-6 z-40 text-white shadow-2xl w-72 transition-all duration-500 ${
+            sidebarOpen ? 'right-[416px]' : 'right-8'
+        }`}>
             <div className="flex flex-col gap-6">
                 <div>
                     <h4 className="text-[9px] uppercase tracking-[0.2em] text-teal-400 mb-3 font-bold opacity-80">
@@ -18,3 +24,4 @@ export default function Legend() {
         </div>
     );
 }
+

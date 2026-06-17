@@ -565,8 +565,8 @@ export default function MarineGlobe() {
             <div ref={containerRef} className="absolute inset-0 w-full h-full bg-[#00040a]" />
 
             {/* Top Navigation & Status Bar */}
-            <div className="absolute top-6 left-6 z-40 flex flex-col gap-4">
-                <div className="pointer-events-none mb-2">
+            <div className="absolute top-6 left-6 z-40 flex flex-col gap-3">
+                <div className="pointer-events-none">
                     <h1 className="text-3xl font-light tracking-[0.3em] uppercase text-white/90">
                         Planète sous <span className="font-semibold text-teal-400 text-glow">Protection</span>
                     </h1>
@@ -575,22 +575,24 @@ export default function MarineGlobe() {
                     </p>
                 </div>
 
-                <div className="flex items-center gap-3 pointer-events-auto">
-                    <div className="flex gap-2">
-                        {[
-                             { id: 'wdpa', label: 'PNUE WDPA', status: (serviceStatus as any).wdpa },
-                             { id: 'gebco', label: 'Grille GEBCO', status: serviceStatus.gebco },
-                             { id: 'mangrove', label: 'Mangroves', status: serviceStatus.mangrove }
-                        ].map(s => (
-                            <div key={s.id} className="flex items-center gap-2 bg-black/40 border border-white/5 backdrop-blur-md px-3 py-1.5 rounded-lg">
-                                {s.status === 'loading' && <Loader2 size={10} className="animate-spin text-slate-500" />}
-                                {s.status === 'active' && <CheckCircle2 size={10} className="text-teal-500" />}
-                                {s.status === 'error' && <AlertCircle size={10} className="text-rose-500" />}
-                                <span className="text-[10px] font-bold uppercase tracking-widest opacity-60">{s.label}</span>
-                            </div>
-                        ))}
-                    </div>
+                {/* Status Row */}
+                <div className="flex flex-wrap gap-2 pointer-events-auto">
+                    {[
+                         { id: 'wdpa', label: 'PNUE WDPA', status: (serviceStatus as any).wdpa },
+                         { id: 'gebco', label: 'Grille GEBCO', status: serviceStatus.gebco },
+                         { id: 'mangrove', label: 'Mangroves', status: serviceStatus.mangrove }
+                    ].map(s => (
+                        <div key={s.id} className="flex items-center gap-2 bg-black/40 border border-white/5 backdrop-blur-md px-3 py-1.5 rounded-lg">
+                            {s.status === 'loading' && <Loader2 size={10} className="animate-spin text-slate-500" />}
+                            {s.status === 'active' && <CheckCircle2 size={10} className="text-teal-500" />}
+                            {s.status === 'error' && <AlertCircle size={10} className="text-rose-500" />}
+                            <span className="text-[10px] font-bold uppercase tracking-widest opacity-60">{s.label}</span>
+                        </div>
+                    ))}
+                </div>
 
+                {/* Action Buttons Row */}
+                <div className="flex items-center gap-2 pointer-events-auto">
                     <button
                         onClick={() => {
                             if (viewerRef.current) {
@@ -600,19 +602,19 @@ export default function MarineGlobe() {
                                 });
                             }
                         }}
-                        className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[10px] font-bold uppercase tracking-tighter px-4 py-1.5 rounded-lg transition-all"
+                        className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[10px] font-bold uppercase tracking-wider px-4 py-2 rounded-lg transition-all"
                     >
                         Focus sur Djibouti
                     </button>
 
-                    <div className="flex gap-1 ml-2">
+                    <div className="flex gap-1">
                         <button
                             onClick={() => {
                                 if (viewerRef.current) {
                                     viewerRef.current.camera.zoomIn(viewerRef.current.camera.positionCartographic.height * 0.3);
                                 }
                             }}
-                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none px-3 py-1.5 rounded-lg transition-all"
+                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none w-8 h-8 flex items-center justify-center rounded-lg transition-all"
                             title="Zoomer"
                         >
                             +
@@ -623,7 +625,7 @@ export default function MarineGlobe() {
                                     viewerRef.current.camera.zoomOut(viewerRef.current.camera.positionCartographic.height * 0.3);
                                 }
                             }}
-                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none px-3 py-1.5 rounded-lg transition-all"
+                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none w-8 h-8 flex items-center justify-center rounded-lg transition-all"
                             title="Dézoomer"
                         >
                             -
@@ -641,10 +643,12 @@ export default function MarineGlobe() {
                 <Sidebar mpa={selectedMpa as any} onClose={() => setSelectedMpa(null)} />
             )}
 
-            <Legend />
+            <Legend sidebarOpen={!!selectedMpa} />
 
             {/* Attribution & Copyright */}
-            <div className="absolute bottom-2 right-8 z-40 pointer-events-none text-right">
+            <div className={`absolute bottom-2 z-40 pointer-events-none text-right transition-all duration-500 ${
+                selectedMpa ? 'right-[416px]' : 'right-8'
+            }`}>
                 <p className="text-[9px] tracking-[0.4em] uppercase text-white/30 font-medium">
                     ©Moustapha Farah 2026 • Flux WDPA/GEBCO/WCMC
                 </p>

@@ -14,57 +14,42 @@ interface MPAData {
     properties: Record<string, any>;
 }
 
-// Custom Proxy for GitHub Pages production to handle complex GIS URLs
-class CustomProxy {
-    baseUrl: string;
-    constructor(baseUrl: string) {
-        this.baseUrl = baseUrl;
-    }
-    getURL(url: string) {
-        return this.baseUrl + encodeURIComponent(url);
-    }
-}
-
-const getResource = (path: string) => {
-    const isProd = import.meta.env.PROD;
-    const targetUrl = 'https://data-gis.unep-wcmc.org' + path;
-
-    if (isProd) {
-        return new Cesium.Resource({
-            url: targetUrl,
-            // corsproxy.io is high-availability and handles GIS headers well
-            proxy: new CustomProxy('https://corsproxy.io/?') as any
-        });
-    }
-
-    // In dev, use the Vite proxy defined in vite.config.ts
-    const localBase = path.startsWith('/server') ? '/wdpa-api' : '/habitats-api';
-    return new Cesium.Resource({ url: localBase + path });
-};
+// WCMC GIS base URL — FeatureServer supports CORS for djib-carto.github.io natively
+const WCMC_BASE = 'https://data-gis.unep-wcmc.org';
 
 export default function MarineGlobe() {
     const containerRef = useRef<HTMLDivElement>(null);
     const viewerRef = useRef<Cesium.Viewer | null>(null);
 
     // Layer References
+    const satelliteLayerRef = useRef<Cesium.ImageryLayer | null>(null);
     const wdpaLayerRef = useRef<Cesium.ImageryLayer | null>(null);
-    const wdpaDataSourceRef = useRef<Cesium.GeoJsonDataSource | null>(null);
     const mangroveLayerRef = useRef<Cesium.ImageryLayer | null>(null);
     const bathyLayerRef = useRef<Cesium.ImageryLayer | null>(null);
+
+    // Vector Datasources for high-fidelity glowing layers zoomed in
+    const wdpaDataSourceRef = useRef<Cesium.GeoJsonDataSource | null>(null);
+    const mangroveDataSourceRef = useRef<Cesium.GeoJsonDataSource | null>(null);
+    const activeAbortControllerRef = useRef<AbortController | null>(null);
 
     const [selectedMpa, setSelectedMpa] = useState<MPAData | null>(null);
     const [isViewerReady, setIsViewerReady] = useState(false);
     const [serviceStatus, setServiceStatus] = useState({
         wdpa: 'loading',
-        gebco: 'active'
+        gebco: 'active',
+        mangrove: 'loading'
     });
 
     const [layers, setLayers] = useState({
-        bathymetry: false, // Default off to see imagery better
+        bathymetry: false,
         mpas: true,
         mangroves: true,
         imagery: true
     });
+
+    // Store layers in ref so callbacks/handlers can read the latest values
+    const layersRef = useRef(layers);
+    useEffect(() => { layersRef.current = layers; }, [layers]);
 
     useEffect(() => {
         if (!containerRef.current) return;
@@ -117,85 +102,236 @@ export default function MarineGlobe() {
         };
     }, []);
 
-    // Function high-performance pour charger les données vectorielles par BBOX
+    // Refresh WDPA and Mangrove vector data for the current camera BBOX.
+    // Uses direct WCMC FeatureServer URLs.
     const refreshVectorData = async () => {
-        if (!viewerRef.current || !layers.mpas) return;
+        if (!viewerRef.current || !isViewerReady) return;
         const viewer = viewerRef.current;
+        const currentLayers = layersRef.current;
 
-        // Calculer l'étendue actuelle de la vue
+        const height = viewer.camera.positionCartographic.height;
+
+        // Cancel any pending fetch requests
+        if (activeAbortControllerRef.current) {
+            activeAbortControllerRef.current.abort();
+        }
+        activeAbortControllerRef.current = new AbortController();
+        const signal = activeAbortControllerRef.current.signal;
+
         const extent = viewer.camera.computeViewRectangle();
         if (!extent) return;
-
-        // Limiter la charge : ne charger les vecteurs que si on est assez proche du sol
-        if (viewer.camera.positionCartographic.height > 10000000) {
-            if (wdpaDataSourceRef.current) wdpaDataSourceRef.current.show = false;
-            return;
-        }
 
         const xmin = Cesium.Math.toDegrees(extent.west);
         const ymin = Cesium.Math.toDegrees(extent.south);
         const xmax = Cesium.Math.toDegrees(extent.east);
         const ymax = Cesium.Math.toDegrees(extent.north);
+        const bbox = `${xmin},${ymin},${xmax},${ymax}`;
 
-        try {
-            // Requête Spatiale Optimisée : On ne récupère que ce qui est visible
-            const queryPath = `/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/FeatureServer/1/query?` +
-                `geometry=${xmin},${ymin},${xmax},${ymax}&geometryType=esriGeometryEnvelope&spatialRel=esriSpatialRelIntersects&outFields=*&f=geojson`;
+        // A. Aires Protégées WDPA — visible as vector < 2 000 km, otherwise as MapServer tiles
+        if (currentLayers.mpas) {
+            if (height < 2000000) {
+                if (wdpaLayerRef.current) wdpaLayerRef.current.show = false;
+                try {
+                    const wdpaUrl = `${WCMC_BASE}/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/FeatureServer/1/query?` +
+                        `geometry=${bbox}` +
+                        `&geometryType=esriGeometryEnvelope` +
+                        `&spatialRel=esriSpatialRelIntersects` +
+                        `&outFields=*` +
+                        `&inSR=4326&outSR=4326` +
+                        `&f=geojson`;
 
-            const resource = getResource(queryPath);
+                    const resp = await fetch(wdpaUrl, { signal });
+                    const geojson = await resp.json();
 
-            if (!wdpaDataSourceRef.current) {
-                wdpaDataSourceRef.current = new Cesium.GeoJsonDataSource("WDPA-Vector");
-                viewer.dataSources.add(wdpaDataSourceRef.current);
+                    if (!wdpaDataSourceRef.current) {
+                        wdpaDataSourceRef.current = new Cesium.GeoJsonDataSource('WDPA-Vector');
+                        viewer.dataSources.add(wdpaDataSourceRef.current);
+                    }
+                    
+                    await wdpaDataSourceRef.current.load(geojson, { clampToGround: false });
+
+                    // Golden glowing styling
+                    const wdpaFill = Cesium.Color.fromCssColorString('#FFD700').withAlpha(0.25);
+                    const entities = wdpaDataSourceRef.current.entities.values;
+                    const newPolylines: Cesium.Entity[] = [];
+
+                    for (const entity of entities) {
+                        if (entity.polygon) {
+                            entity.polygon.material = new Cesium.ColorMaterialProperty(wdpaFill) as any;
+                            entity.polygon.outline = new Cesium.ConstantProperty(false);
+
+                            const hierarchy = entity.polygon.hierarchy?.getValue(Cesium.JulianDate.now());
+                            if (hierarchy && hierarchy.positions && hierarchy.positions.length > 0) {
+                                const positions = [...hierarchy.positions, hierarchy.positions[0]];
+                                const glowBorder = new Cesium.Entity({
+                                    name: entity.name,
+                                    properties: entity.properties,
+                                    polyline: {
+                                        positions: positions,
+                                        width: 4,
+                                        material: new Cesium.PolylineGlowMaterialProperty({
+                                            glowPower: 0.25,
+                                            taperPower: 1.0,
+                                            color: Cesium.Color.fromCssColorString('#FFD700')
+                                        }),
+                                        clampToGround: false
+                                    }
+                                });
+                                newPolylines.push(glowBorder);
+                            }
+                        }
+                    }
+                    for (const poly of newPolylines) {
+                        wdpaDataSourceRef.current.entities.add(poly);
+                    }
+
+                    wdpaDataSourceRef.current.show = true;
+                } catch (e: any) {
+                    if (e.name !== 'AbortError') {
+                        console.warn('WDPA vector load skipped', e);
+                    }
+                }
+            } else {
+                if (wdpaLayerRef.current) wdpaLayerRef.current.show = true;
+                if (wdpaDataSourceRef.current) wdpaDataSourceRef.current.show = false;
             }
+        } else {
+            if (wdpaLayerRef.current) wdpaLayerRef.current.show = false;
+            if (wdpaDataSourceRef.current) wdpaDataSourceRef.current.show = false;
+        }
 
-            await wdpaDataSourceRef.current.load(resource, {
-                stroke: Cesium.Color.fromCssColorString('#f59e0b'), // Ambre/Orange
-                fill: Cesium.Color.fromCssColorString('#f59e0b').withAlpha(0.3),
-                strokeWidth: 2,
-                clampToGround: true
-            });
+        // B. Mangroves — visible as vector < 2 000 km with neon green glow, otherwise as MapServer tiles
+        if (currentLayers.mangroves) {
+            if (height < 2000000) {
+                if (mangroveLayerRef.current) mangroveLayerRef.current.show = false;
+                try {
+                    const mangroveUrl = `${WCMC_BASE}/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/FeatureServer/0/query?` +
+                        `geometry=${bbox}` +
+                        `&geometryType=esriGeometryEnvelope` +
+                        `&spatialRel=esriSpatialRelIntersects` +
+                        `&outFields=*` +
+                        `&inSR=4326&outSR=4326` +
+                        `&f=geojson`;
 
-            wdpaDataSourceRef.current.show = true;
-            setServiceStatus(prev => ({ ...prev, wdpa: 'active' }));
-        } catch (e) {
-            console.warn("BBOX Vector load skipped", e);
+                    const resp = await fetch(mangroveUrl, { signal });
+                    const geojson = await resp.json();
+
+                    if (!mangroveDataSourceRef.current) {
+                        mangroveDataSourceRef.current = new Cesium.GeoJsonDataSource('Mangroves-Vector');
+                        viewer.dataSources.add(mangroveDataSourceRef.current);
+                    }
+
+                    await mangroveDataSourceRef.current.load(geojson, { clampToGround: false });
+
+                    // Glowing neon styling (vivid neon-green fill + glowing bright outline)
+                    const mangroveFill = Cesium.Color.fromCssColorString('#39FF14').withAlpha(0.4);
+                    const entities = mangroveDataSourceRef.current.entities.values;
+                    const newPolylines: Cesium.Entity[] = [];
+
+                    for (const entity of entities) {
+                        if (entity.polygon) {
+                            entity.polygon.material = new Cesium.ColorMaterialProperty(mangroveFill) as any;
+                            entity.polygon.outline = new Cesium.ConstantProperty(false);
+
+                            const hierarchy = entity.polygon.hierarchy?.getValue(Cesium.JulianDate.now());
+                            if (hierarchy && hierarchy.positions && hierarchy.positions.length > 0) {
+                                const positions = [...hierarchy.positions, hierarchy.positions[0]];
+                                const glowBorder = new Cesium.Entity({
+                                    name: entity.name,
+                                    properties: entity.properties,
+                                    polyline: {
+                                        positions: positions,
+                                        width: 6,
+                                        material: new Cesium.PolylineGlowMaterialProperty({
+                                            glowPower: 0.35,
+                                            taperPower: 1.0,
+                                            color: Cesium.Color.fromCssColorString('#39FF14')
+                                        }),
+                                        clampToGround: false
+                                    }
+                                });
+                                newPolylines.push(glowBorder);
+                            }
+                        }
+                    }
+                    for (const poly of newPolylines) {
+                        mangroveDataSourceRef.current.entities.add(poly);
+                    }
+
+                    mangroveDataSourceRef.current.show = true;
+                } catch (e: any) {
+                    if (e.name !== 'AbortError') {
+                        console.warn('Mangrove vector load skipped', e);
+                    }
+                }
+            } else {
+                if (mangroveLayerRef.current) mangroveLayerRef.current.show = true;
+                if (mangroveDataSourceRef.current) mangroveDataSourceRef.current.show = false;
+            }
+        } else {
+            if (mangroveLayerRef.current) mangroveLayerRef.current.show = false;
+            if (mangroveDataSourceRef.current) mangroveDataSourceRef.current.show = false;
         }
     };
 
-    // Effect for Authoritative Layer Management
+    // Effect for Imagery Layer Management (Satellite, WDPA, Mangroves, GEBCO)
     useEffect(() => {
         if (!viewerRef.current || !isViewerReady) return;
         const viewer = viewerRef.current;
 
         const connectServices = async () => {
-            // 0. ESRI Satellite Imagery (BASE LAYER)
             const layersCollection = viewer.imageryLayers;
-            const imageryCount = layersCollection.length;
 
-            // Check if we already have the imagery layer added
-            let esaImagery = null;
-            for (let i = 0; i < imageryCount; i++) {
-                const l = layersCollection.get(i);
-                if (l.imageryProvider instanceof Cesium.ArcGisMapServerImageryProvider && l.imageryProvider.url.includes('World_Imagery')) {
-                    esaImagery = l;
-                    break;
-                }
-            }
-
-            if (!esaImagery) {
+            // 0. ESRI Satellite Imagery (BASE LAYER) — Esri public service, CORS OK
+            if (!satelliteLayerRef.current) {
                 try {
                     const imageryProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
                         'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
                     );
-                    esaImagery = layersCollection.addImageryProvider(imageryProvider, 0); // Always bottom
+                    satelliteLayerRef.current = layersCollection.addImageryProvider(imageryProvider, 0);
                 } catch (e) {
-                    console.error("Satellite Service Error");
+                    console.error('Satellite Service Error', e);
                 }
             }
-            if (esaImagery) esaImagery.show = layers.imagery;
+            if (satelliteLayerRef.current) {
+                satelliteLayerRef.current.show = layers.imagery;
+            }
 
-            // A. Bathymétrie (Official GEBCO Global WMS)
+            // A. WDPA Protected Areas (ArcGIS MapServer — CORS OK)
+            if (!wdpaLayerRef.current) {
+                try {
+                    const wdpaProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+                        'https://data-gis.unep-wcmc.org/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/MapServer',
+                        {
+                            layers: '1'
+                        }
+                    );
+                    wdpaLayerRef.current = layersCollection.addImageryProvider(wdpaProvider);
+                    setServiceStatus(prev => ({ ...prev, wdpa: 'active' }));
+                } catch (e) {
+                    console.error('WDPA MapServer Error', e);
+                    setServiceStatus(prev => ({ ...prev, wdpa: 'error' }));
+                }
+            }
+
+            // B. Mangroves (ArcGIS MapServer — CORS OK)
+            if (!mangroveLayerRef.current) {
+                try {
+                    const mangroveProvider = await Cesium.ArcGisMapServerImageryProvider.fromUrl(
+                        'https://data-gis.unep-wcmc.org/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/MapServer',
+                        {
+                            layers: '0'
+                        }
+                    );
+                    mangroveLayerRef.current = layersCollection.addImageryProvider(mangroveProvider);
+                    setServiceStatus(prev => ({ ...prev, mangrove: 'active' }));
+                } catch (e) {
+                    console.error('Mangrove MapServer Error', e);
+                    setServiceStatus(prev => ({ ...prev, mangrove: 'error' }));
+                }
+            }
+
+            // C. Bathymétrie GEBCO (WMS public — CORS OK)
             if (!bathyLayerRef.current) {
                 try {
                     const gebcoProvider = new Cesium.WebMapServiceImageryProvider({
@@ -205,7 +341,7 @@ export default function MarineGlobe() {
                     });
                     bathyLayerRef.current = layersCollection.addImageryProvider(gebcoProvider);
                 } catch (e) {
-                    console.error("GEBCO Error", e);
+                    console.error('GEBCO Error', e);
                 }
             }
             if (bathyLayerRef.current) {
@@ -213,41 +349,11 @@ export default function MarineGlobe() {
                 bathyLayerRef.current.alpha = 0.5;
             }
 
-            // B. Visual WDPA (Imagery - Ambre/Or)
-            if (!wdpaLayerRef.current) {
-                try {
-                    const wdpaResource = getResource('/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/MapServer');
-                    const wdpaImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(wdpaResource);
-                    wdpaLayerRef.current = layersCollection.addImageryProvider(wdpaImagery);
-                    wdpaLayerRef.current.alpha = 0.8;
-                } catch (e) {
-                    console.error("WDPA Imagery Error", e);
-                }
-            }
-            if (wdpaLayerRef.current) wdpaLayerRef.current.show = layers.mpas;
+            viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
 
-            // C. Mangroves (Vert Émeraude - BOOST DE LISIBILITÉ)
-            if (!mangroveLayerRef.current) {
-                try {
-                    const mangroveResource = getResource('/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/MapServer');
-                    const mangroveImagery = await Cesium.ArcGisMapServerImageryProvider.fromUrl(mangroveResource);
-                    mangroveLayerRef.current = layersCollection.addImageryProvider(mangroveImagery);
-                    mangroveLayerRef.current.alpha = 1.0;
-                    mangroveLayerRef.current.brightness = 2.5; // Très brillant
-                    mangroveLayerRef.current.contrast = 1.5;   // Tranchant
-                } catch (e) {
-                    console.error("Mangrove Error", e);
-                }
-            }
-            if (mangroveLayerRef.current) {
-                mangroveLayerRef.current.show = layers.mangroves;
-                // S'assurer que les mangroves sont au-dessus pour être vues
-                layersCollection.raiseToTop(mangroveLayerRef.current);
-            }
-
+            // Load initial vector data and update on camera move
             viewer.camera.moveEnd.addEventListener(refreshVectorData);
             refreshVectorData();
-            viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
         };
 
         connectServices();
@@ -255,55 +361,203 @@ export default function MarineGlobe() {
         return () => {
             if (viewer) viewer.camera.moveEnd.removeEventListener(refreshVectorData);
         };
+    }, [isViewerReady]);
+
+    // React to layer toggle changes for visibility
+    useEffect(() => {
+        if (!viewerRef.current || !isViewerReady) return;
+
+        if (satelliteLayerRef.current) {
+            satelliteLayerRef.current.show = layers.imagery;
+        }
+        if (bathyLayerRef.current) {
+            bathyLayerRef.current.show = layers.bathymetry;
+        }
+        
+        // Refresh vector and raster layers reactively
+        refreshVectorData();
     }, [layers, isViewerReady]);
 
-    // Handle Direct Vector Interactions (GeoJSON Picking)
+    // Handle Direct Coordinate-Based Queries and Native Picking (ArcGIS FeatureServer/Entity Picking)
     useEffect(() => {
         if (!viewerRef.current || !isViewerReady) return;
         const viewer = viewerRef.current;
         const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 
-        handler.setInputAction((movement: any) => {
-            // Pick vector entities instead of imagery features
-            const pickedObject = viewer.scene.pick(movement.position);
+        handler.setInputAction(async (movement: any) => {
+            // Get clicked position on the ellipsoid
+            const ray = viewer.camera.getPickRay(movement.position);
+            if (!ray) return;
+            const cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+            if (!Cesium.defined(cartesian)) {
+                setSelectedMpa(null);
+                return;
+            }
 
+            const cartographic = Cesium.Cartographic.fromCartesian(cartesian);
+            const longitude = Cesium.Math.toDegrees(cartographic.longitude);
+            const latitude = Cesium.Math.toDegrees(cartographic.latitude);
+
+            // 1. Try to pick native vector entities first (when zoomed in)
+            const pickedObject = viewer.scene.pick(movement.position);
             if (Cesium.defined(pickedObject) && pickedObject.id instanceof Cesium.Entity) {
                 const entity = pickedObject.id;
                 const props = entity.properties;
 
-                // Helper to extract properties from the GeoJSON entity attributes
                 const getValue = (key: string) => {
                     const prop = props?.[key];
                     if (prop && typeof prop.getValue === 'function') {
                         return prop.getValue(Cesium.JulianDate.now());
                     }
-                    return 'N/A';
+                    return null;
                 };
 
-                setSelectedMpa({
-                    properties: {
-                        NAME: getValue('ORIG_NAME') || getValue('NAME') || 'Indisponible',
-                        STATUS: getValue('STATUS') || 'Désigné',
-                        DESIG: getValue('DESIG_ENG') || getValue('DESIG') || 'Aire Protégée',
-                        IUCN_CAT: getValue('IUCN_CAT') || 'Non Rapporté',
-                        REP_AREA: getValue('REP_AREA') || 0,
-                        STATUS_YR: getValue('STATUS_YR') || 'N/A',
-                        GOV_TYPE: getValue('GOV_TYPE') || 'Gouvernance Locale/État'
-                    }
-                });
+                // Check if this entity or its outline is a Mangrove
+                const isMangrove = entity.entityCollection?.owner?.name === 'Mangroves-Vector' || 
+                                   entity.name?.includes('Mangroves') || 
+                                   (props && props['WCMC011_AT'] !== undefined);
 
-                // High-performance cinematic fly-to
-                viewer.flyTo(entity, {
-                    duration: 1.5,
-                    offset: new Cesium.HeadingPitchRange(0, -Cesium.Math.PI_OVER_FOUR, 1000000)
+                if (isMangrove) {
+                    const iso = getValue('parent_iso') || getValue('iso3') || 'DJI';
+                    const countryName = iso === 'DJI' ? 'Djibouti' : (iso === 'ERI' ? 'Érythrée' : (iso === 'SOM' ? 'Somalie' : (iso === 'YEM' ? 'Yémen' : iso)));
+                    const nameVal = getValue('orig_name') && getValue('orig_name') !== 'Not Reported' ? getValue('orig_name') : (getValue('name') && getValue('name') !== 'Not Reported' ? getValue('name') : `Mangroves (${countryName})`);
+                    const gisArea = getValue('gis_area_k') && getValue('gis_area_k') !== 'Not Reported' ? getValue('gis_area_k') : (getValue('rep_area_k') && getValue('rep_area_k') !== 'Not Reported' ? getValue('rep_area_k') : 0);
+                    const statusYear = getValue('start_date') && getValue('start_date') !== 'Not Reported' ? getValue('start_date') : (getValue('end_date') && getValue('end_date') !== 'Not Reported' ? getValue('end_date') : '2010');
+                    const designation = getValue('data_type') && getValue('data_type') !== 'Not Reported' ? getValue('data_type') : 'Habitat de Mangrove';
+                    const status = getValue('protect_st') && getValue('protect_st') !== 'Not Reported' ? getValue('protect_st') : (getValue('protect') === 2 ? 'Protégé (Statut National)' : 'Actif (Non Protégé)');
+                    const govType = getValue('verif') && getValue('verif') !== 'Not Reported' ? getValue('verif') : 'Vérifié par l\'Institution';
+
+                    setSelectedMpa({
+                        properties: {
+                            NAME: nameVal,
+                            STATUS: status,
+                            DESIG: designation,
+                            IUCN_CAT: 'N/A',
+                            REP_AREA: Number(gisArea) || 0,
+                            STATUS_YR: statusYear,
+                            GOV_TYPE: govType
+                        }
+                    });
+                } else {
+                    setSelectedMpa({
+                        properties: {
+                            NAME: getValue('ORIG_NAME') || getValue('NAME') || 'Indisponible',
+                            STATUS: getValue('STATUS') || 'Désigné',
+                            DESIG: getValue('DESIG_ENG') || getValue('DESIG') || 'Aire Protégée',
+                            IUCN_CAT: getValue('IUCN_CAT') || 'Non Rapporté',
+                            REP_AREA: getValue('REP_AREA') || getValue('REP_M_AREA') || 0,
+                            STATUS_YR: getValue('STATUS_YR') || 'N/A',
+                            GOV_TYPE: getValue('GOV_TYPE') || 'Gouvernance Locale/État'
+                        }
+                    });
+                }
+
+                viewer.camera.flyTo({
+                    destination: Cesium.Cartesian3.fromDegrees(longitude, latitude, viewer.camera.positionCartographic.height * 0.5),
+                    duration: 1.5
                 });
-            } else {
-                setSelectedMpa(null);
+                return;
             }
+
+            // 2. Fall back to coordinate queries (when zoomed out)
+            // Fetch features from WDPA FeatureServer (Layer 1) using point geometry query if active
+            if (layersRef.current.mpas) {
+                try {
+                    const wdpaUrl = `${WCMC_BASE}/server/rest/services/ProtectedSites/The_World_Database_of_Protected_Areas/FeatureServer/1/query?` +
+                        `geometry=${longitude},${latitude}` +
+                        `&geometryType=esriGeometryPoint` +
+                        `&spatialRel=esriSpatialRelIntersects` +
+                        `&outFields=*` +
+                        `&inSR=4326&outSR=4326` +
+                        `&f=geojson`;
+
+                    const resp = await fetch(wdpaUrl);
+                    const geojson = await resp.json();
+
+                    if (geojson.features && geojson.features.length > 0) {
+                        const feature = geojson.features[0];
+                        const props = feature.properties;
+                        
+                        setSelectedMpa({
+                            properties: {
+                                NAME: props.ORIG_NAME || props.NAME || 'Indisponible',
+                                STATUS: props.STATUS || 'Désigné',
+                                DESIG: props.DESIG_ENG || props.DESIG || 'Aire Protégée',
+                                IUCN_CAT: props.IUCN_CAT || 'Non Rapporté',
+                                REP_AREA: props.REP_AREA || props.REP_M_AREA || 0,
+                                STATUS_YR: props.STATUS_YR || 'N/A',
+                                GOV_TYPE: props.GOV_TYPE || 'Gouvernance Locale/État'
+                            }
+                        });
+
+                        viewer.camera.flyTo({
+                            destination: Cesium.Cartesian3.fromDegrees(longitude, latitude, viewer.camera.positionCartographic.height * 0.5),
+                            duration: 1.5
+                        });
+                        return;
+                    }
+                } catch (e) {
+                    console.error('WDPA point query failed', e);
+                }
+            }
+
+            // Fetch features from Mangroves FeatureServer (Layer 0) using point geometry query if active
+            if (layersRef.current.mangroves) {
+                try {
+                    const mangroveUrl = `${WCMC_BASE}/server/rest/services/HabitatsAndBiotopes/WCMC011_AtlasMangrove2010_v3/FeatureServer/0/query?` +
+                        `geometry=${longitude},${latitude}` +
+                        `&geometryType=esriGeometryPoint` +
+                        `&spatialRel=esriSpatialRelIntersects` +
+                        `&outFields=*` +
+                        `&inSR=4326&outSR=4326` +
+                        `&f=geojson`;
+
+                    const resp = await fetch(mangroveUrl);
+                    const geojson = await resp.json();
+
+                    if (geojson.features && geojson.features.length > 0) {
+                        const feature = geojson.features[0];
+                        const props = feature.properties;
+
+                        const iso = props.parent_iso || props.iso3 || 'DJI';
+                        const countryName = iso === 'DJI' ? 'Djibouti' : (iso === 'ERI' ? 'Érythrée' : (iso === 'SOM' ? 'Somalie' : (iso === 'YEM' ? 'Yémen' : iso)));
+                        const nameVal = props.orig_name && props.orig_name !== 'Not Reported' ? props.orig_name : (props.name && props.name !== 'Not Reported' ? props.name : `Mangroves (${countryName})`);
+                        const gisArea = props.gis_area_k && props.gis_area_k !== 'Not Reported' ? props.gis_area_k : (props.rep_area_k && props.rep_area_k !== 'Not Reported' ? props.rep_area_k : 0);
+                        const statusYear = props.start_date && props.start_date !== 'Not Reported' ? props.start_date : (props.end_date && props.end_date !== 'Not Reported' ? props.end_date : '2010');
+                        const designation = props.data_type && props.data_type !== 'Not Reported' ? props.data_type : 'Habitat de Mangrove';
+                        const status = props.protect_st && props.protect_st !== 'Not Reported' ? props.protect_st : (props.protect === 2 ? 'Protégé (Statut National)' : 'Actif (Non Protégé)');
+                        const govType = props.verif && props.verif !== 'Not Reported' ? props.verif : 'Vérifié par l\'Institution';
+
+                        setSelectedMpa({
+                            properties: {
+                                NAME: nameVal,
+                                STATUS: status,
+                                DESIG: designation,
+                                IUCN_CAT: 'N/A',
+                                REP_AREA: Number(gisArea) || 0,
+                                STATUS_YR: statusYear,
+                                GOV_TYPE: govType
+                            }
+                        });
+
+                        viewer.camera.flyTo({
+                            destination: Cesium.Cartesian3.fromDegrees(longitude, latitude, viewer.camera.positionCartographic.height * 0.5),
+                            duration: 1.5
+                        });
+                        return;
+                    }
+                } catch (e) {
+                    console.error('Mangrove point query failed', e);
+                }
+            }
+
+            setSelectedMpa(null);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
         return () => handler.destroy();
     }, [isViewerReady]);
+
+
 
     return (
         <div className="relative w-full h-full font-sans antialiased text-slate-100 selection:bg-teal-500/30">
@@ -314,7 +568,7 @@ export default function MarineGlobe() {
             <div className="absolute top-6 left-6 z-40 flex flex-col gap-4">
                 <div className="pointer-events-none mb-2">
                     <h1 className="text-3xl font-light tracking-[0.3em] uppercase text-white/90">
-                        Planète sous <span className="font-semibold text-teal-400 text-glow"> Protection</span>
+                        Planète sous <span className="font-semibold text-teal-400 text-glow">Protection</span>
                     </h1>
                     <p className="text-[10px] tracking-[0.4em] uppercase text-white/40 mt-1">
                         Suivi des Écosystèmes et Aires Protégées
@@ -324,8 +578,9 @@ export default function MarineGlobe() {
                 <div className="flex items-center gap-3 pointer-events-auto">
                     <div className="flex gap-2">
                         {[
-                            { id: 'wdpa', label: 'PNUE WDPA', status: serviceStatus.wdpa },
-                            { id: 'gebco', label: 'Grille GEBCO', status: serviceStatus.gebco }
+                             { id: 'wdpa', label: 'PNUE WDPA', status: (serviceStatus as any).wdpa },
+                             { id: 'gebco', label: 'Grille GEBCO', status: serviceStatus.gebco },
+                             { id: 'mangrove', label: 'Mangroves', status: serviceStatus.mangrove }
                         ].map(s => (
                             <div key={s.id} className="flex items-center gap-2 bg-black/40 border border-white/5 backdrop-blur-md px-3 py-1.5 rounded-lg">
                                 {s.status === 'loading' && <Loader2 size={10} className="animate-spin text-slate-500" />}
@@ -349,6 +604,31 @@ export default function MarineGlobe() {
                     >
                         Focus sur Djibouti
                     </button>
+
+                    <div className="flex gap-1 ml-2">
+                        <button
+                            onClick={() => {
+                                if (viewerRef.current) {
+                                    viewerRef.current.camera.zoomIn(viewerRef.current.camera.positionCartographic.height * 0.3);
+                                }
+                            }}
+                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none px-3 py-1.5 rounded-lg transition-all"
+                            title="Zoomer"
+                        >
+                            +
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (viewerRef.current) {
+                                    viewerRef.current.camera.zoomOut(viewerRef.current.camera.positionCartographic.height * 0.3);
+                                }
+                            }}
+                            className="bg-teal-500/20 hover:bg-teal-500/30 border border-teal-500/40 text-teal-100 text-[14px] font-bold leading-none px-3 py-1.5 rounded-lg transition-all"
+                            title="Dézoomer"
+                        >
+                            -
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -363,7 +643,7 @@ export default function MarineGlobe() {
 
             <Legend />
 
-            {/* Attribution & Copyright - Positioned at extreme bottom to avoid overlap */}
+            {/* Attribution & Copyright */}
             <div className="absolute bottom-2 right-8 z-40 pointer-events-none text-right">
                 <p className="text-[9px] tracking-[0.4em] uppercase text-white/30 font-medium">
                     ©Moustapha Farah 2026 • Flux WDPA/GEBCO/WCMC
